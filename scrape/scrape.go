@@ -802,6 +802,47 @@ const (
 
 var UserAgent = fmt.Sprintf("Prometheus/%s", version.Version)
 
+type bodyReader struct {
+  reader io.Reader
+  bodySize int64
+}
+
+// io.Reader
+func (r *bodyReader) Read(p []byte) (int, error) {
+  return r.Read(p)
+}
+
+// io.WriterTo
+func (r *bodyReader) WriteTo(dst io.Writer) (int64, error) {
+  bufReader := bufio.NewReader(r.reader)
+  bufWriter := bufio.NewWriter(dst)
+  var n int64 = 0
+  for n < r.bodySize {
+    b, err := bufReader.ReadByte()
+    if err != nil {
+      if err == io.EOF {
+        break
+      }
+      return n, err
+    }
+
+    if err := bufWriter.WriteByte(b); err != nil {
+      return n, err
+    }
+
+    n++
+  }
+
+  err := bufWriter.Flush()
+  if err != nil {
+    return n, err
+  }
+  if int64(n) >= r.bodySize {
+    return n, errBodySizeLimit
+  }
+  return int64(n), nil
+}
+
 func (s *targetScraper) scrape(ctx context.Context, w io.Writer) (string, error) {
 	if s.req == nil {
 		req, err := http.NewRequest("GET", s.URL().String(), nil)
@@ -833,13 +874,13 @@ func (s *targetScraper) scrape(ctx context.Context, w io.Writer) (string, error)
 		s.bodySizeLimit = math.MaxInt64
 	}
 	if resp.Header.Get("Content-Encoding") != "gzip" {
-		n, err := io.Copy(w, io.LimitReader(resp.Body, s.bodySizeLimit))
+    br := &bodyReader{reader: resp.Body, bodySize: s.bodySizeLimit}
+		_, err := io.Copy(w, br)
 		if err != nil {
+      if errors.Is(err, errBodySizeLimit) {
+        targetScrapeExceededBodySizeLimit.Inc()
+      }
 			return "", err
-		}
-		if n >= s.bodySizeLimit {
-			targetScrapeExceededBodySizeLimit.Inc()
-			return "", errBodySizeLimit
 		}
 		return resp.Header.Get("Content-Type"), nil
 	}
@@ -857,14 +898,14 @@ func (s *targetScraper) scrape(ctx context.Context, w io.Writer) (string, error)
 		}
 	}
 
-	n, err := io.Copy(w, io.LimitReader(s.gzipr, s.bodySizeLimit))
+  br := &bodyReader{reader: s.gzipr, bodySize: s.bodySizeLimit}
+	_, err = io.Copy(w, br)
 	s.gzipr.Close()
 	if err != nil {
+    if errors.Is(err, errBodySizeLimit) {
+      targetScrapeExceededBodySizeLimit.Inc()
+    }
 		return "", err
-	}
-	if n >= s.bodySizeLimit {
-		targetScrapeExceededBodySizeLimit.Inc()
-		return "", errBodySizeLimit
 	}
 	return resp.Header.Get("Content-Type"), nil
 }
